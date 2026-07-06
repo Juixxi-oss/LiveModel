@@ -59,5 +59,7 @@ data/photo/*
 data/label/*
 !data/label/.gitkeep
 evaluation/*
+!evaluation/*.py
+!evaluation/*.sh
 file/*
 log/*
