@@ -66,13 +66,11 @@ This repository **does NOT include**:
 │   ├── evaluation_util.py
 │   ├── export_predictions.py
 │   ├── export_main.py
-│   ├── export_predictions_parallel_by_dataset.sh
 │   ├── analysis_core.py
 │   ├── analysis_tests.py
 │   ├── analysis_tasks.py
 │   ├── analysis_human.py
-│   ├── analyze_main.py
-│   └── analyze_predictions.sh
+│   └── analyze_main.py
 └── requirements.txt
 ```
 
