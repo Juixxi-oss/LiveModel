@@ -10,7 +10,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-file/stat_results}
 
 mkdir -p log/analyze
 
-python -u main/analyze_main.py \
+python -u evaluation/analyze_main.py \
     --input-root "${INPUT_ROOT}" \
     --grade-type "${GRADE_TYPE}" \
     --datasets internal external \
@@ -32,7 +32,6 @@ python -u main/analyze_main.py \
 echo "[*] Finished: ${GRADE_TYPE}"
 echo "    log: log/analyze/analyze_${GRADE_TYPE}.txt"
 echo "    output: ${OUTPUT_DIR}/${GRADE_TYPE}"
-
 
 
 

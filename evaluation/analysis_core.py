@@ -258,6 +258,8 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "dataset_name": "",
         "eval_mode": "",
         "model_name": "",
+        "reader_id": "",
+        "assistance_mode": "",
         "grade_type": "",
         "fold": np.nan,
         "SeriesID": "",
@@ -317,7 +319,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["padding_length"] = pd.to_numeric(df["padding_length"], errors="coerce")
     df["abs_error"] = (df["y_pred"] - df["y_true"]).abs()
     df["squared_error"] = (df["y_pred"] - df["y_true"]) ** 2
-    for c in ["dataset_name", "eval_mode", "model_name", "grade_type", "SeriesID", "center", "patient_id", "eye_id", "visit", "target_visit", "padding_tag", "available_visits", "mask_pattern"]:
+    for c in ["dataset_name", "eval_mode", "model_name", "reader_id", "assistance_mode", "grade_type", "SeriesID", "center", "patient_id", "eye_id", "visit", "target_visit", "padding_tag", "available_visits", "mask_pattern"]:
         df[c] = df[c].fillna("").astype(str)
     return df
 
