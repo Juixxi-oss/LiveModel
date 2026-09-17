@@ -154,6 +154,322 @@ NON_VARIANT_COLS = {
 }
 
 
+HUMAN_AI_CASE_COLS = [
+    "grade_type",
+    "SeriesID",
+    "patient_id",
+    "eye_id",
+    "center",
+    "visit",
+    "target_visit",
+]
+
+
+def _is_model_alone_variant(variant: str) -> bool:
+    """Return whether a human-AI label denotes the fixed AI-only model."""
+    normalized = "".join(ch for ch in str(variant).lower() if ch.isalnum())
+    return normalized == "modelalone"
+
+
+def _aggregate_human_ai_variant(
+    df: pd.DataFrame,
+    variant: str,
+    include_reader: bool,
+) -> pd.DataFrame:
+    """
+    Collapse only true duplicate records.
+
+    Reader identity remains part of the key for human conditions, so two
+    different readers are never averaged before the crossed bootstrap.  The
+    model-alone condition has no reader dimension and is aggregated only over
+    duplicate exports for the same case.
+    """
+    sub = df[df["model_name"].astype(str).eq(str(variant))].copy()
+    sub = sub.dropna(subset=["y_true", "y_pred"])
+    if sub.empty:
+        return sub
+
+    group_cols = list(HUMAN_AI_CASE_COLS)
+    if include_reader:
+        group_cols.append("reader_id")
+
+    return (
+        sub.groupby(group_cols, dropna=False)
+        .agg({"y_true": "first", "y_pred": "mean"})
+        .reset_index()
+    )
+
+
+def _build_human_ai_pair_data(
+    df: pd.DataFrame,
+    variant_a: str,
+    variant_b: str,
+) -> pd.DataFrame:
+    """
+    Build reader-preserving paired data for one human-AI comparison.
+
+    Human-vs-human comparisons are paired within reader and case.  For a
+    human-vs-model comparison, the fixed model prediction is joined to each
+    reader's score on the same case.  This repeats the model value only to
+    form reader-specific paired losses; it does not treat the model as a
+    randomly sampled reader.
+    """
+    a_is_model = _is_model_alone_variant(variant_a)
+    b_is_model = _is_model_alone_variant(variant_b)
+
+    if a_is_model and b_is_model:
+        warnings.warn(
+            "Skipping model-alone versus model-alone comparison in human_ai: "
+            "the crossed reader-by-patient analysis needs a human condition."
+        )
+        return pd.DataFrame()
+
+    if a_is_model or b_is_model:
+        model_variant = variant_a if a_is_model else variant_b
+        human_variant = variant_b if a_is_model else variant_a
+
+        model = _aggregate_human_ai_variant(df, model_variant, include_reader=False)
+        human = _aggregate_human_ai_variant(df, human_variant, include_reader=True)
+        if model.empty or human.empty:
+            return pd.DataFrame()
+
+        pair = human.merge(
+            model,
+            on=HUMAN_AI_CASE_COLS,
+            how="inner",
+            suffixes=("_human", "_model"),
+        )
+        if pair.empty:
+            return pd.DataFrame()
+
+        # Keep the requested A/B orientation in every output statistic.
+        if a_is_model:
+            pred_a = pair["y_pred_model"]
+            pred_b = pair["y_pred_human"]
+            truth_a = pair["y_true_model"]
+            truth_b = pair["y_true_human"]
+        else:
+            pred_a = pair["y_pred_human"]
+            pred_b = pair["y_pred_model"]
+            truth_a = pair["y_true_human"]
+            truth_b = pair["y_true_model"]
+    else:
+        a = _aggregate_human_ai_variant(df, variant_a, include_reader=True)
+        b = _aggregate_human_ai_variant(df, variant_b, include_reader=True)
+        if a.empty or b.empty:
+            return pd.DataFrame()
+
+        pair = a.merge(
+            b,
+            on=HUMAN_AI_CASE_COLS + ["reader_id"],
+            how="inner",
+            suffixes=("_a", "_b"),
+        )
+        if pair.empty:
+            return pd.DataFrame()
+        pred_a = pair["y_pred_a"]
+        pred_b = pair["y_pred_b"]
+        truth_a = pair["y_true_a"]
+        truth_b = pair["y_true_b"]
+
+    y_true_a = pd.to_numeric(truth_a, errors="coerce")
+    y_true_b = pd.to_numeric(truth_b, errors="coerce")
+    disagree = y_true_a.notna() & y_true_b.notna() & ~np.isclose(y_true_a, y_true_b)
+    if disagree.any():
+        warnings.warn(
+            f"{disagree.sum()} human-AI paired rows have inconsistent y_true; "
+            "using the first comparison side as the reference truth."
+        )
+
+    out = pair[HUMAN_AI_CASE_COLS + ["reader_id"]].copy()
+    out["y_true"] = y_true_a
+    out["y_pred_a"] = pd.to_numeric(pred_a, errors="coerce")
+    out["y_pred_b"] = pd.to_numeric(pred_b, errors="coerce")
+    out = out.dropna(subset=["y_true", "y_pred_a", "y_pred_b"])
+
+    # All patient records remain in a cluster.
+    out["_bootstrap_patient_id"] = out["patient_id"].where(
+        out["patient_id"].astype(str).str.strip().ne(""),
+        out["SeriesID"],
+    )
+    out["reader_id"] = out["reader_id"].fillna("reader_unknown").astype(str)
+    return out
+
+
+def _weighted_metric(
+    sub: pd.DataFrame,
+    prediction_col: str,
+    metric: str,
+    patient_counts: dict,
+) -> float:
+    """Calculate a row-level metric with bootstrap patient multiplicities."""
+    if sub.empty:
+        return np.nan
+
+    weights = sub["_bootstrap_patient_id"].map(patient_counts).fillna(0).to_numpy(dtype=float)
+    valid = weights > 0
+    if not valid.any():
+        return np.nan
+
+    y_true = sub.loc[valid, "y_true"].to_numpy(dtype=float)
+    y_pred = sub.loc[valid, prediction_col].to_numpy(dtype=float)
+    weights = weights[valid]
+    err = y_pred - y_true
+    denominator = weights.sum()
+
+    if metric == "MAE":
+        return float(np.dot(weights, np.abs(err)) / denominator)
+    if metric == "MSE":
+        return float(np.dot(weights, err ** 2) / denominator)
+    if metric == "RMSE":
+        mse = np.dot(weights, err ** 2) / denominator
+        return float(np.sqrt(mse))
+    raise ValueError(f"Unknown metric: {metric}")
+
+
+def _reader_averaged_pair_metrics(
+    paired: pd.DataFrame,
+    metric: str,
+    sampled_readers: np.ndarray,
+    patient_counts: dict,
+) -> tuple[float, float]:
+    """Return reader-equal metric estimates for A and B in one replicate."""
+    estimates_a = []
+    estimates_b = []
+    for reader_id in sampled_readers:
+        sub = paired[paired["reader_id"].eq(reader_id)]
+        metric_a = _weighted_metric(sub, "y_pred_a", metric, patient_counts)
+        metric_b = _weighted_metric(sub, "y_pred_b", metric, patient_counts)
+        if np.isfinite(metric_a) and np.isfinite(metric_b):
+            estimates_a.append(metric_a)
+            estimates_b.append(metric_b)
+
+    if not estimates_a:
+        return np.nan, np.nan
+    return float(np.mean(estimates_a)), float(np.mean(estimates_b))
+
+
+def crossed_reader_patient_bootstrap(
+    paired: pd.DataFrame,
+    variant_a: str,
+    variant_b: str,
+    metric: str,
+    n_bootstrap: int = 2000,
+    seed: int = 42,
+) -> dict:
+    """
+    Reader-averaged paired comparison with crossed reader/patient bootstrap.
+
+    In every replicate readers and patient clusters are independently sampled
+    with replacement.  The returned p value is a two-sided, null-centered
+    bootstrap p value for H0: metric(A) - metric(B) = 0.
+    """
+    if paired.empty:
+        return {
+            "variant_a": variant_a,
+            "variant_b": variant_b,
+            "metric": metric,
+            "n": 0,
+            "n_patients": 0,
+            "n_readers": 0,
+            "estimate_a": np.nan,
+            "estimate_b": np.nan,
+            "diff_a_minus_b": np.nan,
+            "ci_lower": np.nan,
+            "ci_upper": np.nan,
+            "p_value": np.nan,
+            "bootstrap_design": "crossed_reader_patient",
+        }
+
+    reader_ids = paired["reader_id"].drop_duplicates().to_numpy()
+    patient_ids = paired["_bootstrap_patient_id"].drop_duplicates().to_numpy()
+    point_patient_counts = {patient_id: 1 for patient_id in patient_ids}
+    estimate_a, estimate_b = _reader_averaged_pair_metrics(
+        paired,
+        metric,
+        reader_ids,
+        point_patient_counts,
+    )
+    diff = estimate_a - estimate_b
+
+    if n_bootstrap <= 0 or not np.isfinite(diff):
+        lo = hi = p_value = np.nan
+    else:
+        rng = np.random.default_rng(seed)
+        boot_diffs = []
+        for _ in range(n_bootstrap):
+            sampled_readers = rng.choice(reader_ids, size=len(reader_ids), replace=True)
+            sampled_patients = rng.choice(patient_ids, size=len(patient_ids), replace=True)
+            patient_counts = pd.Series(sampled_patients).value_counts().to_dict()
+            boot_a, boot_b = _reader_averaged_pair_metrics(
+                paired,
+                metric,
+                sampled_readers,
+                patient_counts,
+            )
+            if np.isfinite(boot_a) and np.isfinite(boot_b):
+                boot_diffs.append(boot_a - boot_b)
+
+        boot_diffs = np.asarray(boot_diffs, dtype=float)
+        if len(boot_diffs) == 0:
+            lo = hi = p_value = np.nan
+        else:
+            lo, hi = np.nanpercentile(boot_diffs, [2.5, 97.5])
+            p_value = (
+                1 + np.sum(np.abs(boot_diffs - diff) >= abs(diff))
+            ) / (len(boot_diffs) + 1)
+
+    return {
+        "variant_a": variant_a,
+        "variant_b": variant_b,
+        "metric": metric,
+        "n": int(len(paired)),
+        "n_patients": int(len(patient_ids)),
+        "n_readers": int(len(reader_ids)),
+        "estimate_a": estimate_a,
+        "estimate_b": estimate_b,
+        "diff_a_minus_b": diff,
+        "ci_lower": float(lo) if np.isfinite(lo) else lo,
+        "ci_upper": float(hi) if np.isfinite(hi) else hi,
+        "p_value": p_value,
+        "bootstrap_design": "crossed_reader_patient",
+    }
+
+
+def human_ai_pairwise_tests(
+    df: pd.DataFrame,
+    n_bootstrap: int = 2000,
+    seed: int = 42,
+    variants: Optional[list[str]] = None,
+) -> pd.DataFrame:
+    """Run reader-preserving crossed bootstrap comparisons for human-AI data."""
+    df = ensure_columns(df).dropna(subset=["y_true", "y_pred"]).copy()
+    available = df["model_name"].astype(str).drop_duplicates().tolist()
+    if variants is not None:
+        available = [variant for variant in variants if variant in available]
+
+    rows = []
+    for i, variant_a in enumerate(available):
+        for variant_b in available[i + 1:]:
+            paired = _build_human_ai_pair_data(df, variant_a, variant_b)
+            for metric in METRICS:
+                rows.append(
+                    crossed_reader_patient_bootstrap(
+                        paired=paired,
+                        variant_a=variant_a,
+                        variant_b=variant_b,
+                        metric=metric,
+                        n_bootstrap=n_bootstrap,
+                        seed=seed,
+                    )
+                )
+
+    out = pd.DataFrame(rows)
+    if len(out) and "p_value" in out:
+        out["p_holm"] = holm_adjust(out["p_value"].tolist())
+    return out
+
+
 def pairwise_tests(
     df: pd.DataFrame,
     task: str,
@@ -162,6 +478,14 @@ def pairwise_tests(
     seed: int = 42,
     variants: Optional[list[str]] = None,
 ) -> pd.DataFrame:
+    if task == "human_ai":
+        return human_ai_pairwise_tests(
+            df=df,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+            variants=variants,
+        )
+
     df = make_variant(df, task)
     # wide = build_pairwise_wide(df)
     id_cols = [

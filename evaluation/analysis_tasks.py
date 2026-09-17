@@ -23,7 +23,13 @@ def load_exported_predictions(input_root: str, grade_type: str, datasets: list[s
 def select_dataset(df: pd.DataFrame, dataset_group: str) -> pd.DataFrame:
     df = ensure_columns(df)
     if dataset_group == "internal":
-        return df[df["dataset_name"].eq("internal")].copy()
+        internal_mask = df["dataset_name"].eq("internal")
+        internal_centers = set(df.loc[internal_mask, "center"].dropna().astype(str))
+        human_internal_mask = (
+            df["eval_mode"].eq("human_ai")
+            & df["center"].isin(internal_centers)
+        )
+        return df[internal_mask | human_internal_mask].copy()
     if dataset_group in {"S01", "S09"}:
         # External CSV may have dataset_name=external, so split by center.
         return df[df["center"].eq(dataset_group)].copy()
@@ -169,10 +175,22 @@ def run_task(
     perf = performance_table(sub, performance_group_cols(task), cluster_col, n_bootstrap, seed)
     perf.to_csv(os.path.join(output_dir, f"{prefix}_{task}_{dataset_group}_performance.csv"), index=False)
     if should_pairwise(task):
-        boot = pairwise_tests(sub, task=task if task not in {"single_time", "v9_models", "human_ai"} else "model", cluster_col=cluster_col, n_bootstrap=n_bootstrap, seed=seed)
+        pair_task = task if task not in {"single_time", "v9_models"} else "model"
+        boot = pairwise_tests(
+            sub,
+            task=pair_task,
+            cluster_col=cluster_col,
+            n_bootstrap=n_bootstrap,
+            seed=seed,
+        )
         boot.to_csv(os.path.join(output_dir, f"{prefix}_{task}_{dataset_group}_pairwise_cluster_bootstrap.csv"), index=False)
-        if run_gee or run_mixedlm:
-            gee, mixed = regression_pairwise_tests(sub, task=task if task not in {"single_time", "v9_models", "human_ai"} else "model", cluster_col=cluster_col)
+        if task == "human_ai" and (run_gee or run_mixedlm):
+            print(
+                "[*] human_ai pairwise inference uses crossed reader-patient bootstrap; "
+                "legacy GEE/MixedLM outputs are skipped because they do not model reader effects."
+            )
+        elif run_gee or run_mixedlm:
+            gee, mixed = regression_pairwise_tests(sub, task=pair_task, cluster_col=cluster_col)
             if run_gee:
                 gee.to_csv(os.path.join(output_dir, f"{prefix}_{task}_{dataset_group}_pairwise_gee.csv"), index=False)
             if run_mixedlm:
