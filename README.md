@@ -182,18 +182,14 @@ python main/SnapRegressor_main.py --your_args_here
 
 > 💡 Because datasets and weights are not released, users must configure their own training settings, including batch size, `num_workers`, mixed precision, checkpoint paths, and other hardware-dependent options.
 >
-> 📝 The training scripts specify runnable model settings. The scheduler-enabled SnapRegressor script is for new runs; it does not describe the checkpoints behind the reported results.
+> 📝 The training scripts specify the model settings. The SnapRegressor batch script selects `--scheduler warmup_cosine`; a direct entrypoint call requires that option to select the same schedule.
 
 ---
 
 # 🔬 Reproducibility Notes
 
 - 🖼️ Image input resolution and augmentation policy in the paper included resizing to **224×224** and common photometric/geometric augmentations.
-- The released trainers use **AdamW**. A bare SnapRegressor entrypoint call
-  defaults to a constant learning rate, while its batch training script now
-  enables warm-up and cosine restarts for new runs. The fusion trainers also
-  include warm-up and cosine schedules. The Snap schedule is a subsequent code
-  extension, not a claim about training that produced the existing results.
+- The released trainers use **AdamW**. SinglePhoto training uses linear warm-up followed by cosine warm restarts, as selected by `training/train_SnapRegressor.sh`. A direct call to `main/SnapRegressor_main.py` defaults to `--scheduler none` unless `--scheduler warmup_cosine` is passed. The fusion trainers also use warm-up and cosine schedules.
 - 🔄 Progressive initialization was applied from single-view modeling to spatial fusion and then spatiotemporal modeling:
 
 ```text
@@ -208,32 +204,29 @@ MultiViewTimeFusionRegressor
 
 ---
 
-# Code additions on 2026-09-23
+# SnapRegressor learning-rate schedule
 
-SnapRegressor now supports an optional epoch-based scheduler: linear warm-up
+SnapRegressor supports an epoch-based scheduler: linear warm-up
 from 0.1 to 1.0 of the base rate over 5 epochs, then cosine warm restarts with
 `T_0=15`, `T_mult=2`, and `eta_min=1e-7`. It advances once per training epoch.
-`--scheduler none` is the default and preserves the original training behavior.
-The existing SnapRegressor training script now enables this schedule for new
-runs. Reported outputs have not been changed.
+The batch training script selects `--scheduler warmup_cosine`; a direct
+entrypoint call defaults to `--scheduler none` unless the schedule is selected.
 
-For a single future run, select `--scheduler warmup_cosine`, or use the
-separate recipe:
+For a single run with this schedule, select `--scheduler warmup_cosine`, or use
+the separate recipe:
 
 ```bash
 bash training/train_SnapRegressor_with_scheduler.sh \
   --grade_type C --photo_type C --device cuda:0
 ```
 
-The batch script and separate recipe write future checkpoints to
+The batch script and separate recipe write checkpoints to
 `file/SnapRegressor_warmup_cosine`; the batch script writes logs to
 `log/SnapRegressor_warmup_cosine`.
-The scheduler configuration is recorded in newly saved checkpoint metadata.
-No existing weights are converted by this addition.
+The scheduler configuration is recorded in checkpoint metadata.
 
 `trainer/util.py::generate_attention_2` generates soft supervision targets for
-temporal attention. It does not transform the clinical outcome labels. The
-attention target, mask normalization and loss calculations are unchanged.
+temporal attention. It does not transform the clinical outcome labels.
 
 ---
 

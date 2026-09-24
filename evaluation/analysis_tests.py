@@ -81,9 +81,13 @@ def pairwise_cluster_bootstrap(
     n_bootstrap: int = 2000,
     seed: int = 42,
 ) -> dict:
-    cols = ["y_true", variant_a, variant_b]
-    cols += [cluster_col] if cluster_col in wide.columns else []
-    sub = wide.dropna(subset=["y_true", variant_a, variant_b]).copy()
+    """Compare paired models with patient clusters sampled within each center.
+
+    Each replicate draws the original number of patients independently from
+    every center, retains all rows for each drawn patient, then calculates one
+    pooled metric difference across the combined sampled rows.
+    """
+    sub = wide.dropna(subset=["y_true", variant_a, variant_b]).reset_index(drop=True)
     if len(sub) == 0:
         return {"variant_a": variant_a, "variant_b": variant_b, "metric": metric, "n": 0, "estimate_a": np.nan, "estimate_b": np.nan, "diff_a_minus_b": np.nan, "ci_lower": np.nan, "ci_upper": np.nan, "p_value": np.nan}
     est_a = metric_value(sub["y_true"], sub[variant_a], metric)
@@ -92,15 +96,23 @@ def pairwise_cluster_bootstrap(
     if n_bootstrap <= 0:
         lo = hi = p = np.nan
     else:
+        for col in ("center", cluster_col):
+            if col not in sub.columns or sub[col].isna().any() or sub[col].astype(str).str.strip().eq("").any():
+                raise ValueError(f"Center-stratified bootstrap requires a populated {col} column.")
+
         rng = np.random.default_rng(seed)
-        if cluster_col not in sub.columns:
-            sub[cluster_col] = np.arange(len(sub))
-        clusters = [g.index.to_numpy() for _, g in sub.groupby(cluster_col, dropna=False)]
+        center_clusters = [
+            [patient.index.to_numpy() for _, patient in center.groupby(cluster_col, sort=False)]
+            for _, center in sub.groupby("center", sort=False)
+        ]
         vals = np.empty(n_bootstrap, dtype=float)
         for i in range(n_bootstrap):
-            sampled = rng.integers(0, len(clusters), len(clusters))
-            idx = np.concatenate([clusters[j] for j in sampled])
-            boot = sub.loc[idx]
+            idx = np.concatenate([
+                clusters[j]
+                for clusters in center_clusters
+                for j in rng.integers(0, len(clusters), len(clusters))
+            ])
+            boot = sub.iloc[idx]
             vals[i] = metric_value(boot["y_true"], boot[variant_a], metric) - metric_value(boot["y_true"], boot[variant_b], metric)
         lo, hi = np.nanpercentile(vals, [2.5, 97.5])
         p = 2 * min(np.mean(vals <= 0), np.mean(vals >= 0))
