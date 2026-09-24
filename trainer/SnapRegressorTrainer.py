@@ -6,12 +6,22 @@ from torch.utils.data import DataLoader
 
 from .BaseTrainer import BaseTrainer
 from .util import setSeed, update_dropout
+from .schedulers import build_snap_scheduler
 
 
 class SnapRegressorTrainer(BaseTrainer):
     def __init__(self, **kwargs):
         self.photo_type = kwargs.pop('photo_type')
         self.num_iters = kwargs.pop('num_iters', 0)
+        # Opt-in extension: the default retains the historical Snap schedule.
+        self.scheduler_config = {
+            'scheduler_type': kwargs.pop('scheduler_type', 'none'),
+            'warmup_epochs': kwargs.pop('warmup_epochs', 5),
+            'start_factor': kwargs.pop('start_factor', 0.1),
+            'T_0': kwargs.pop('T_0', 15),
+            'T_mult': kwargs.pop('T_mult', 2),
+            'eta_min': kwargs.pop('eta_min', 1e-7),
+        }
         split_path = kwargs.pop('split_path', None)
 
         super().__init__(is_series_task=False, split_path=split_path, **kwargs)
@@ -40,6 +50,10 @@ class SnapRegressorTrainer(BaseTrainer):
             lr=self.lr,
             weight_decay=1e-3
         )
+        # Recreated with the optimizer at the start of every fold.
+        self.scheduler = build_snap_scheduler(
+            self.optimizer, **self.scheduler_config
+        )
 
         total_params = sum(p.numel() for p in self.model.parameters())
         trainable_params = sum(p.numel() for p in params_to_update)
@@ -47,6 +61,7 @@ class SnapRegressorTrainer(BaseTrainer):
         print('[*] Optimizer initialized: AdamW')
         print(f'    trainable params: {trainable_params:,}')
         print(f'    total params    : {total_params:,}')
+        print(f'    scheduler       : {self.scheduler_config}')
 
     def _select_photo(self, photos: torch.Tensor) -> torch.Tensor:
         """
@@ -170,6 +185,7 @@ class SnapRegressorTrainer(BaseTrainer):
 
         for epoch in range(self.num_epochs):
             self.current_epoch = epoch
+            epoch_lr = self.optimizer.param_groups[0]['lr']
 
             update_dropout(
                 self.model,
@@ -201,11 +217,15 @@ class SnapRegressorTrainer(BaseTrainer):
                 print(
                     f'    Fold {fold_idx + 1} | '
                     f'Epoch {epoch + 1:03d}/{self.num_epochs} | '
+                    f'LR: {epoch_lr:.8g} | '
                     f'Train Loss: {train_smooth_l1:.6f} | '
                     f'Val Loss: {val_smooth_l1:.6f} | '
                     f'Train MSE: {train_mse:.6f} | '
                     f'Val MSE: {val_mse:.6f}'
                 )
+
+            if self.scheduler is not None:
+                self.scheduler.step()
 
         used_time = time.time() - start_time
 
@@ -216,7 +236,8 @@ class SnapRegressorTrainer(BaseTrainer):
                 'fold_idx': fold_idx,
                 'photo_type': self.photo_type,
                 'best_val_loss': best_loss,
-                'grade_type': self.grade_type
+                'grade_type': self.grade_type,
+                'scheduler_config': dict(self.scheduler_config)
             }
         )
 

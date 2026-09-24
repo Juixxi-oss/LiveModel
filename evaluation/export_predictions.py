@@ -161,9 +161,7 @@ def export_single_time(args, selectors, fold_idx, device, transform, task_type):
                 specs.append(('predictor_padding_length', padding_length, None, valid_indices, 0))
 
             tag_specs = [
-                # ('all', list(range(8))),
                 ('half', [0, 4]),
-                # ('1', [0]),
             ]
 
             for tag, valid_indices in tag_specs:
@@ -268,9 +266,7 @@ def export_multi_time(args, selectors, fold_idx, device, transform, task_type):
                 specs.append(('predictor_padding_length', padding_length, None, valid_indices, 0))
 
             tag_specs = [
-                # ('all', list(range(8))),
                 ('half', [0, 4]),
-                # ('1', [0]),
             ]
 
             for tag, valid_indices in tag_specs:

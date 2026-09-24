@@ -60,7 +60,7 @@ def build_truth_map(model_df: pd.DataFrame) -> pd.DataFrame:
     model_df = ensure_columns(model_df)
     keys = ["grade_type", "SeriesID"]
     truth = model_df.dropna(subset=["y_true"]).groupby(keys, dropna=False)["y_true"].first().reset_index()
-    # Normalized backup key.
+    # Match patient, eye, visit, and outcome when SeriesID formats differ.
     meta = truth["SeriesID"].map(parse_series_id)
     truth["norm_key"] = [f"{m['patient_id']}|{m['eye_id']}|{m['visit']}|{g}" for m, g in zip(meta, truth["grade_type"])]
     return truth

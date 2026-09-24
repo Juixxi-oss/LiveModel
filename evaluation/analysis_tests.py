@@ -39,7 +39,6 @@ def build_pairwise_wide(df: pd.DataFrame, id_cols: Optional[list[str]] = None) -
     if "variant" not in df.columns:
         df["variant"] = df["model_name"]
     if id_cols is None:
-        # id_cols = ["dataset_name", "grade_type", "SeriesID", "patient_id", "eye_id", "target_visit"]
         id_cols = [
             "dataset_name",
             "grade_type",
@@ -487,7 +486,6 @@ def pairwise_tests(
         )
 
     df = make_variant(df, task)
-    # wide = build_pairwise_wide(df)
     id_cols = [
         "dataset_name",
         "grade_type",
@@ -515,12 +513,7 @@ def pairwise_tests(
         # 这类任务是比较 padding/tag 条件本身，所以不要把这些条件列放进 id_cols
         pass
 
-    else:
-        # single_time / v9_models / human_ai 等
-        pass
-
     wide = build_pairwise_wide(df, id_cols=id_cols)
-    # all_variants = [c for c in wide.columns if c not in {"dataset_name", "grade_type", "SeriesID", "patient_id", "eye_id", "target_visit", "padding_length", "padding_tag", "available_visits", "mask_pattern", "repeat_idx", "y_true"}]
     all_variants = [c for c in wide.columns if c not in NON_VARIANT_COLS]
     if variants is not None:
         all_variants = [v for v in variants if v in all_variants]
@@ -695,7 +688,7 @@ def gee_pairwise_test(
             "diff_A_minus_B": np.nan,
             "coef_B_minus_A": np.nan,
             "p_value": np.nan,
-            "status": "insufficient data",
+            "status": "comparison input requires both model labels",
         }
 
     try:
@@ -777,7 +770,7 @@ def mixedlm_pairwise_test(
             "diff_A_minus_B": np.nan,
             "coef_B_minus_A": np.nan,
             "p_value": np.nan,
-            "status": "insufficient data",
+            "status": "comparison input requires both model labels",
         }
 
     try:
@@ -829,17 +822,10 @@ def regression_pairwise_tests(
     """
     GEE/MixedLM pairwise tests on absolute and squared error.
 
-    This implementation is aligned with analyze_long_predictions.py:
-        - A/B model coding with A as reference
-        - coefficient = error_B - error_A
-        - diff_A_minus_B = error_A - error_B
-        - GEE grouped by subject_id
-        - MixedLM random intercept for subject_id
-        - optional eye_id variance component
-        - optional adjustment for center, visit_num, age, sex
+    A is the reference condition: coefficient = error_B - error_A and
+    diff_A_minus_B = error_A - error_B. Subject ID defines repeated rows.
     """
     df = make_variant(df, task)
-    # wide = build_pairwise_wide(df)
     id_cols = [
         "dataset_name",
         "grade_type",
@@ -867,36 +853,7 @@ def regression_pairwise_tests(
         # 这类任务是比较 padding/tag 条件本身，所以不要把这些条件列放进 id_cols
         pass
 
-    else:
-        # single_time / v9_models / human_ai 等
-        pass
-
     wide = build_pairwise_wide(df, id_cols=id_cols)
-
-    # non_variant_cols = {
-    #     "dataset_name",
-    #     "grade_type",
-    #     "SeriesID",
-    #     "patient_id",
-    #     "subject_id",
-    #     "eye_id",
-    #     "center",
-    #     "visit",
-    #     "visit_num",
-    #     "target_visit",
-    #     "target_visit_num",
-    #     "padding_length",
-    #     "padding_tag",
-    #     "padding_mode",
-    #     "padding_value",
-    #     "available_visits",
-    #     "mask_pattern",
-    #     "repeat_idx",
-    #     "age",
-    #     "sex",
-    #     "y_true",
-    # }
-    # variant_cols = [c for c in wide.columns if c not in non_variant_cols]
     variant_cols = [c for c in wide.columns if c not in NON_VARIANT_COLS]
     gee_rows = []
     mixed_rows = []
