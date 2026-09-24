@@ -8,15 +8,15 @@ from analysis_tests import pairwise_tests, regression_pairwise_tests
 
 
 def load_exported_predictions(input_root: str, grade_type: str, datasets: list[str]) -> pd.DataFrame:
-    frames = []
-    for d in datasets:
-        path = os.path.join(input_root, grade_type, d, f"final_long_predictions_{grade_type}_{d}.csv")
-        if not os.path.exists(path):
-            print(f"[!] Missing prediction file, skipped: {path}")
-            continue
-        frames.append(pd.read_csv(path))
-    if not frames:
-        raise FileNotFoundError("No exported final_long_predictions CSV files found.")
+    if not datasets:
+        raise ValueError("At least one dataset identifier is required.")
+    frames = [
+        pd.read_csv(os.path.join(
+            input_root, grade_type, dataset,
+            f"final_long_predictions_{grade_type}_{dataset}.csv",
+        ))
+        for dataset in datasets
+    ]
     return ensure_columns(pd.concat(frames, ignore_index=True))
 
 
@@ -169,8 +169,9 @@ def run_task(
     sub = subset_task(sub, task)
     sub = ensure_columns(sub)
     if len(sub) == 0:
-        print(f"[!] Empty subset: task={task}, dataset={dataset_group}")
-        return
+        if task == "human_ai" and dataset_group == "internal":
+            return
+        raise ValueError(f"Task filter selected no rows: task={task}, dataset={dataset_group}")
     sub.to_csv(os.path.join(output_dir, f"{prefix}_{task}_{dataset_group}_analysis_input.csv"), index=False)
     perf = performance_table(sub, performance_group_cols(task), cluster_col, n_bootstrap, seed)
     perf.to_csv(os.path.join(output_dir, f"{prefix}_{task}_{dataset_group}_performance.csv"), index=False)
@@ -187,7 +188,7 @@ def run_task(
         if task == "human_ai" and (run_gee or run_mixedlm):
             print(
                 "[*] human_ai pairwise inference uses crossed reader-patient bootstrap; "
-                "legacy GEE/MixedLM outputs are skipped because they do not model reader effects."
+                "GEE/MixedLM outputs are skipped because they do not model reader effects."
             )
         elif run_gee or run_mixedlm:
             gee, mixed = regression_pairwise_tests(sub, task=pair_task, cluster_col=cluster_col)

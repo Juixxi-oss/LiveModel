@@ -93,6 +93,12 @@ def generate_attention_2(
         src_key_padding_mask: torch.Tensor,
         device: torch.device
 ) -> torch.Tensor:
+    """Return a soft recency prior over available visit positions [B, T].
+
+    This target supervises temporal attention through KL divergence. It is
+    independent of clinical outcome grades and does not smooth their values.
+    Existing numerical behavior (including the 1e-6 denominator) is retained.
+    """
     base = torch.linspace(
         0.1,
         10.0,

@@ -1,6 +1,13 @@
-import os
-import torch
 import argparse
+import os
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import torch
 import pandas as pd
 
 from dataset import getTimePointList, getTimePointsList
@@ -18,10 +25,6 @@ def parse_args():
     parser.add_argument('--models', nargs='+', default=[
         'snap',
         'viewfusion',
-        # 'single_evaluator',
-        # 'single_predictor',
-        # 'multi_evaluator',
-        # 'multi_predictor',
     ])
 
     parser.add_argument('--tabular_path', type=str, default='data/label/label.xlsx')
@@ -156,9 +159,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
 
 
 

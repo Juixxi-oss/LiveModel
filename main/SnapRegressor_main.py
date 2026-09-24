@@ -44,6 +44,16 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', type=int, default=42)
 
+    parser.add_argument(
+        '--scheduler', choices=['none', 'warmup_cosine'], default='none',
+        help='Optional future-training schedule; none preserves the historical baseline.'
+    )
+    parser.add_argument('--warmup_epochs', type=int, default=5)
+    parser.add_argument('--start_factor', type=float, default=0.1)
+    parser.add_argument('--T_0', type=int, default=15)
+    parser.add_argument('--T_mult', type=int, default=2)
+    parser.add_argument('--eta_min', type=float, default=1e-7)
+
     parser.add_argument('--resize_size', type=int, default=224)
     parser.add_argument('--crop_size', type=int, default=224)
 
@@ -124,6 +134,12 @@ def main():
         batch_size=args.batch_size,
         num_epochs=args.num_epochs,
         seed=args.seed,
+        scheduler_type=args.scheduler,
+        warmup_epochs=args.warmup_epochs,
+        start_factor=args.start_factor,
+        T_0=args.T_0,
+        T_mult=args.T_mult,
+        eta_min=args.eta_min,
         drop_last=args.drop_last,
         transform_1=transform_1,
         transform_2=transform_2,

@@ -61,5 +61,9 @@ data/label/*
 evaluation/*
 !evaluation/*.py
 !evaluation/*.sh
+!evaluation/reliability/
+evaluation/reliability/*
+!evaluation/reliability/*.py
+!evaluation/reliability/*.md
 file/*
 log/*

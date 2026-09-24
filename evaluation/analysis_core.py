@@ -1,6 +1,4 @@
-import os
 import re
-import warnings
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -49,7 +47,7 @@ def _view_prediction_column(df: pd.DataFrame, view: str) -> str:
     """
     Return the best available prediction column for one view.
 
-    New export final-level files usually contain y_pred_D_mean / y_pred_C_mean / ...
+    Aggregated files may contain y_pred_D_mean / y_pred_C_mean / ...
     Fold-level files may contain y_pred_D / y_pred_C / ...
     This function supports both.
     """
@@ -114,8 +112,7 @@ def apply_view_selection(
     snap_spec = normalize_view_spec(snap_view)
     single_spec = normalize_view_spec(single_view)
 
-    # Compatible with base names, old ensemble names, and already selected names
-    # such as SnapRegressor_C / SingleViewTimeFusionRegressor_DCP.
+    # Accept base names and view-qualified names such as SnapRegressor_C.
     names = df["model_name"].astype(str)
     snap_mask = (
         names.eq("SnapRegressor")
@@ -133,7 +130,7 @@ def apply_view_selection(
                 snap_spec
             ).values
         else:
-            # Keep existing y_pred only for backward compatibility with old CSVs.
+            # Use an existing prediction when view-specific columns are absent.
             if df.loc[snap_mask, "y_pred"].isna().all():
                 missing = [
                     VIEW_PRED_COLUMNS[v]
@@ -330,14 +327,9 @@ def read_prediction_csv(path: str) -> pd.DataFrame:
 
 
 def read_many_prediction_csv(paths: Iterable[str]) -> pd.DataFrame:
-    frames = []
-    for p in paths:
-        if p and os.path.exists(p):
-            frames.append(read_prediction_csv(p))
-        else:
-            warnings.warn(f"Prediction file not found, skipped: {p}")
+    frames = [read_prediction_csv(p) for p in paths]
     if not frames:
-        raise FileNotFoundError("No valid prediction CSV files were found.")
+        raise ValueError("At least one prediction CSV path is required.")
     return ensure_columns(pd.concat(frames, ignore_index=True))
 
 
