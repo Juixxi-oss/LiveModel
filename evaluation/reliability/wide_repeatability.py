@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def bootstrap(
-        data: list, num_bootstrap_samples: int = 1000, confidence_level: float = 0.95
+        data: list, num_bootstrap_samples: int = 5000, confidence_level: float = 0.95
 ) -> tuple[float, float]:
     data = np.array(data, dtype=float)
     data = data[~np.isnan(data)]

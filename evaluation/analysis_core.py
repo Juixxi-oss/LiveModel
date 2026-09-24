@@ -257,6 +257,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "model_name": "",
         "reader_id": "",
         "assistance_mode": "",
+        "study_task": "",
         "grade_type": "",
         "fold": np.nan,
         "SeriesID": "",
@@ -316,7 +317,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["padding_length"] = pd.to_numeric(df["padding_length"], errors="coerce")
     df["abs_error"] = (df["y_pred"] - df["y_true"]).abs()
     df["squared_error"] = (df["y_pred"] - df["y_true"]) ** 2
-    for c in ["dataset_name", "eval_mode", "model_name", "reader_id", "assistance_mode", "grade_type", "SeriesID", "center", "patient_id", "eye_id", "visit", "target_visit", "padding_tag", "available_visits", "mask_pattern"]:
+    for c in ["dataset_name", "eval_mode", "model_name", "reader_id", "assistance_mode", "study_task", "grade_type", "SeriesID", "center", "patient_id", "eye_id", "visit", "target_visit", "padding_tag", "available_visits", "mask_pattern"]:
         df[c] = df[c].fillna("").astype(str)
     return df
 
@@ -333,30 +334,79 @@ def read_many_prediction_csv(paths: Iterable[str]) -> pd.DataFrame:
     return ensure_columns(pd.concat(frames, ignore_index=True))
 
 
+def load_demographics(path: str) -> pd.DataFrame:
+    source = pd.read_excel(path) if str(path).lower().endswith((".xlsx", ".xls")) else pd.read_csv(path)
+    age_col = next((name for name in ("age", "年龄") if name in source.columns), None)
+    sex_col = next((name for name in ("sex", "性别") if name in source.columns), None)
+    if "SeriesID" not in source.columns or age_col is None or sex_col is None:
+        raise ValueError("The label table must contain SeriesID, age/年龄, and sex/性别 columns.")
+    demographics = source[["SeriesID", age_col, sex_col]].rename(
+        columns={age_col: "age", sex_col: "sex"}
+    ).copy()
+    demographics["SeriesID"] = demographics["SeriesID"].astype(str).str.strip()
+    if demographics["SeriesID"].duplicated().any():
+        raise ValueError("The label table must have one demographic record per SeriesID.")
+    demographics["age"] = pd.to_numeric(demographics["age"], errors="coerce")
+    demographics["sex"] = demographics["sex"].astype("string").str.strip().replace("", pd.NA)
+    return demographics
+
+
+def attach_demographics(predictions: pd.DataFrame, demographics: pd.DataFrame) -> pd.DataFrame:
+    if "SeriesID" not in predictions.columns:
+        raise ValueError("Prediction rows must contain SeriesID to match demographics.")
+    rows = predictions.copy()
+    rows["SeriesID"] = rows["SeriesID"].astype(str).str.strip()
+    rows = rows.merge(demographics, on="SeriesID", how="left", validate="many_to_one", suffixes=("", "_label"))
+    for column in ("age", "sex"):
+        label_column = f"{column}_label"
+        if label_column not in rows.columns:
+            continue
+        existing = rows[column]
+        label = rows[label_column]
+        if column == "age":
+            existing = pd.to_numeric(existing, errors="coerce")
+            label = pd.to_numeric(label, errors="coerce")
+        else:
+            existing = existing.astype("string").str.strip().replace("", pd.NA)
+            label = label.astype("string").str.strip().replace("", pd.NA)
+        if (existing.notna() & label.notna() & existing.ne(label).fillna(False)).any():
+            raise ValueError(f"Prediction {column} values conflict with the label table.")
+        rows[column] = existing.fillna(label)
+        rows = rows.drop(columns=label_column)
+    if rows[["age", "sex"]].isna().any().any():
+        raise ValueError("Age and sex are required for every prediction row.")
+    return rows
+
+
 def cluster_bootstrap_metric_ci(
     df: pd.DataFrame,
     metric: str,
     cluster_col: str = "patient_id",
-    n_bootstrap: int = 2000,
+    n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> tuple[float, float, float, int]:
-    df = df.dropna(subset=["y_true", "y_pred"]).copy()
+    df = df.dropna(subset=["y_true", "y_pred"]).reset_index(drop=True)
     if len(df) == 0:
         return np.nan, np.nan, np.nan, 0
     point = metric_value(df["y_true"].values, df["y_pred"].values, metric)
     if n_bootstrap <= 0:
         return point, np.nan, np.nan, len(df)
     rng = np.random.default_rng(seed)
-    if cluster_col not in df.columns:
-        cluster_col = "patient_id"
-    clusters = [g.index.to_numpy() for _, g in df.groupby(cluster_col, dropna=False)]
-    if len(clusters) == 0:
-        return point, np.nan, np.nan, len(df)
+    for col in ("center", cluster_col):
+        if col not in df.columns or df[col].isna().any() or df[col].astype(str).str.strip().eq("").any():
+            raise ValueError(f"Center-stratified bootstrap requires a populated {col} column.")
+    center_clusters = [
+        [patient.index.to_numpy() for _, patient in center.groupby(cluster_col, sort=False)]
+        for _, center in df.groupby("center", sort=False)
+    ]
     boot = np.empty(n_bootstrap, dtype=float)
     for b in range(n_bootstrap):
-        sampled = rng.integers(0, len(clusters), len(clusters))
-        idx = np.concatenate([clusters[i] for i in sampled])
-        sub = df.loc[idx]
+        idx = np.concatenate([
+            clusters[i]
+            for clusters in center_clusters
+            for i in rng.integers(0, len(clusters), len(clusters))
+        ])
+        sub = df.iloc[idx]
         boot[b] = metric_value(sub["y_true"].values, sub["y_pred"].values, metric)
     return point, float(np.nanpercentile(boot, 2.5)), float(np.nanpercentile(boot, 97.5)), len(df)
 
@@ -365,23 +415,34 @@ def performance_table(
     df: pd.DataFrame,
     group_cols: list[str],
     cluster_col: str = "patient_id",
-    n_bootstrap: int = 2000,
+    n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> pd.DataFrame:
     df = ensure_columns(df).dropna(subset=["y_true", "y_pred"])
     group_cols = [c for c in group_cols if c in df.columns]
     rows = []
-    grouped = df.groupby(group_cols, dropna=False) if group_cols else [((), df)]
-    for key, sub in grouped:
-        if not isinstance(key, tuple):
-            key = (key,)
-        base = dict(zip(group_cols, key))
-        for metric in METRICS:
-            point, lo, hi, n = cluster_bootstrap_metric_ci(
-                sub, metric, cluster_col=cluster_col,
-                n_bootstrap=n_bootstrap, seed=seed,
-            )
-            row = dict(base)
-            row.update({"metric": metric, "estimate": point, "ci_lower": lo, "ci_upper": hi, "n": n, "n_clusters": sub[cluster_col].nunique() if cluster_col in sub else np.nan})
-            rows.append(row)
+
+    def append_group_rows(columns, pooled=False):
+        grouped = df.groupby(columns, dropna=False) if columns else [((), df)]
+        for key, sub in grouped:
+            if pooled and sub["center"].nunique() < 2:
+                continue
+            if not isinstance(key, tuple):
+                key = (key,)
+            base = dict(zip(columns, key))
+            if pooled:
+                base["center"] = "pooled"
+            n_clusters = sub[["center", cluster_col]].drop_duplicates().shape[0]
+            for metric in METRICS:
+                point, lo, hi, n = cluster_bootstrap_metric_ci(
+                    sub, metric, cluster_col=cluster_col,
+                    n_bootstrap=n_bootstrap, seed=seed,
+                )
+                rows.append({**base, "metric": metric, "estimate": point,
+                             "ci_lower": lo, "ci_upper": hi, "n": n,
+                             "n_clusters": n_clusters})
+
+    append_group_rows(group_cols)
+    if "center" in group_cols:
+        append_group_rows([c for c in group_cols if c != "center"], pooled=True)
     return pd.DataFrame(rows)

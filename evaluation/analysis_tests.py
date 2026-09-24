@@ -66,7 +66,7 @@ def build_pairwise_wide(df: pd.DataFrame, id_cols: Optional[list[str]] = None) -
     tmp = df[keep].copy()
     # If duplicate rows exist for same variant/case, average predictions.
     tmp = tmp.groupby(id_cols + ["variant"], dropna=False).agg({"y_true": "first", "y_pred": "mean"}).reset_index()
-    wide_pred = tmp.pivot_table(index=id_cols, columns="variant", values="y_pred", aggfunc="first")
+    wide_pred = tmp.pivot(index=id_cols, columns="variant", values="y_pred")
     wide_true = tmp.groupby(id_cols, dropna=False)["y_true"].first()
     wide = wide_pred.join(wide_true).reset_index()
     return wide
@@ -78,7 +78,7 @@ def pairwise_cluster_bootstrap(
     variant_b: str,
     metric: str,
     cluster_col: str = "patient_id",
-    n_bootstrap: int = 2000,
+    n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> dict:
     """Compare paired models with patient clusters sampled within each center.
@@ -136,6 +136,16 @@ def holm_adjust(pvals):
         out[i] = prev
     return out.tolist()
 
+
+def holm_adjust_by_comparison(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df.copy()
+    df["p_holm"] = np.nan
+    for _, indices in df.groupby(["variant_a", "variant_b", "metric"], sort=False).groups.items():
+        df.loc[indices, "p_holm"] = holm_adjust(df.loc[indices, "p_value"].tolist())
+    return df
+
 NON_VARIANT_COLS = {
     "dataset_name",
     "eval_mode",
@@ -161,11 +171,13 @@ NON_VARIANT_COLS = {
     "sex",
     "assistance_mode",
     "reader_id",
+    "study_task",
     "y_true",
 }
 
 
 HUMAN_AI_CASE_COLS = [
+    "study_task",
     "grade_type",
     "SeriesID",
     "patient_id",
@@ -176,10 +188,20 @@ HUMAN_AI_CASE_COLS = [
 ]
 
 
-def _is_model_alone_variant(variant: str) -> bool:
-    """Return whether a human-AI label denotes the fixed AI-only model."""
+def normalize_human_ai_mode(variant: str) -> str:
+    """Use one label for each reading condition."""
     normalized = "".join(ch for ch in str(variant).lower() if ch.isalnum())
-    return normalized == "modelalone"
+    return {
+        "humanalone": "Human alone",
+        "aialone": "AI alone",
+        "modelalone": "AI alone",
+        "livemodel": "AI alone",
+        "humanai": "Human+AI",
+    }.get(normalized, str(variant))
+
+
+def _is_model_alone_variant(variant: str) -> bool:
+    return normalize_human_ai_mode(variant) == "AI alone"
 
 
 def _aggregate_human_ai_variant(
@@ -365,7 +387,7 @@ def crossed_reader_patient_bootstrap(
     variant_a: str,
     variant_b: str,
     metric: str,
-    n_bootstrap: int = 2000,
+    n_bootstrap: int = 5000,
     seed: int = 42,
 ) -> dict:
     """
@@ -447,37 +469,130 @@ def crossed_reader_patient_bootstrap(
     }
 
 
+def human_ai_performance_table(
+    df: pd.DataFrame,
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Estimate each reading mode, averaging reader metrics before inference."""
+    df = ensure_columns(df).dropna(subset=["y_true", "y_pred"]).copy()
+    df["model_name"] = df["model_name"].map(normalize_human_ai_mode)
+    rng = np.random.default_rng(seed)
+    group_cols = ["dataset_name", "study_task", "grade_type", "model_name", "target_visit"]
+    rows = []
+
+    def append_rows(sub: pd.DataFrame, base: dict, center: str):
+        variant = base["model_name"]
+        model_alone = _is_model_alone_variant(variant)
+        records = _aggregate_human_ai_variant(sub, variant, include_reader=not model_alone)
+        if records.empty:
+            return
+        records["reader_id"] = "AI" if model_alone else records["reader_id"].fillna("reader_unknown").astype(str)
+        records["_bootstrap_patient_id"] = records["patient_id"].where(
+            records["patient_id"].astype(str).str.strip().ne(""), records["SeriesID"]
+        )
+        readers = records["reader_id"].drop_duplicates().tolist()
+        patients = records["_bootstrap_patient_id"].drop_duplicates().tolist()
+        records["abs_loss"] = (records["y_pred"] - records["y_true"]).abs()
+        records["squared_loss"] = (records["y_pred"] - records["y_true"]) ** 2
+        summary = records.groupby(["reader_id", "_bootstrap_patient_id"], sort=False).agg(
+            count=("y_true", "size"), abs_loss=("abs_loss", "sum"),
+            squared_loss=("squared_loss", "sum"),
+        ).reindex(pd.MultiIndex.from_product([readers, patients]), fill_value=0)
+        shape = (len(readers), len(patients))
+        counts = summary["count"].to_numpy(dtype=float).reshape(shape)
+        patient_draws = reader_draws = None
+        if n_bootstrap > 0:
+            patient_draws = rng.multinomial(
+                len(patients), np.full(len(patients), 1 / len(patients)), size=n_bootstrap
+            )
+            reader_draws = (
+                np.ones((n_bootstrap, 1), dtype=float) if model_alone else
+                rng.multinomial(len(readers), np.full(len(readers), 1 / len(readers)), size=n_bootstrap)
+            )
+
+        for metric in ("MAE", "MSE", "RMSE"):
+            loss_col = "abs_loss" if metric == "MAE" else "squared_loss"
+            loss = summary[loss_col].to_numpy(dtype=float).reshape(shape)
+            observed = loss.sum(axis=1) / counts.sum(axis=1)
+            if metric == "RMSE":
+                observed = np.sqrt(observed)
+            estimate = float(observed.mean())
+            lo = hi = np.nan
+            if n_bootstrap > 0:
+                sampled_loss = patient_draws @ loss.T
+                sampled_count = patient_draws @ counts.T
+                sampled = np.divide(
+                    sampled_loss, sampled_count,
+                    out=np.full_like(sampled_loss, np.nan, dtype=float),
+                    where=sampled_count > 0,
+                )
+                if metric == "RMSE":
+                    sampled = np.sqrt(sampled)
+                valid = np.isfinite(sampled)
+                sampled_readers = reader_draws * valid
+                denominator = sampled_readers.sum(axis=1)
+                boot = np.divide(
+                    (np.nan_to_num(sampled) * sampled_readers).sum(axis=1),
+                    denominator,
+                    out=np.full(n_bootstrap, np.nan),
+                    where=denominator > 0,
+                )
+                boot = boot[np.isfinite(boot)]
+                if len(boot):
+                    lo, hi = np.percentile(boot, [2.5, 97.5])
+            rows.append({
+                **base, "center": center, "metric": metric, "estimate": estimate,
+                "ci_lower": lo, "ci_upper": hi, "n": len(records),
+                "n_patients": len(patients), "n_readers": 0 if model_alone else len(readers),
+                "bootstrap_design": "patient_cluster" if model_alone else "crossed_reader_patient",
+            })
+
+    for key, sub in df.groupby(group_cols, sort=False, dropna=False):
+        base = dict(zip(group_cols, key))
+        for center, center_sub in sub.groupby("center", sort=False):
+            append_rows(center_sub, base, center)
+        if sub["center"].nunique() > 1:
+            append_rows(sub, base, "pooled")
+    return pd.DataFrame(rows)
+
+
 def human_ai_pairwise_tests(
     df: pd.DataFrame,
-    n_bootstrap: int = 2000,
+    n_bootstrap: int = 5000,
     seed: int = 42,
     variants: Optional[list[str]] = None,
 ) -> pd.DataFrame:
     """Run reader-preserving crossed bootstrap comparisons for human-AI data."""
     df = ensure_columns(df).dropna(subset=["y_true", "y_pred"]).copy()
-    available = df["model_name"].astype(str).drop_duplicates().tolist()
+    df["model_name"] = df["model_name"].map(normalize_human_ai_mode)
     if variants is not None:
-        available = [variant for variant in variants if variant in available]
-
+        variants = [normalize_human_ai_mode(variant) for variant in variants]
     rows = []
-    for i, variant_a in enumerate(available):
-        for variant_b in available[i + 1:]:
-            paired = _build_human_ai_pair_data(df, variant_a, variant_b)
-            for metric in METRICS:
-                rows.append(
-                    crossed_reader_patient_bootstrap(
+    for (study_task, grade_type), sub in df.groupby(["study_task", "grade_type"], sort=False):
+        available = sub["model_name"].drop_duplicates().tolist()
+        if variants is not None:
+            available = [variant for variant in variants if variant in available]
+        for i, variant_a in enumerate(available):
+            for variant_b in available[i + 1:]:
+                paired = _build_human_ai_pair_data(sub, variant_a, variant_b)
+                rows.append({
+                    "study_task": study_task,
+                    "grade_type": grade_type,
+                    **crossed_reader_patient_bootstrap(
                         paired=paired,
                         variant_a=variant_a,
                         variant_b=variant_b,
-                        metric=metric,
+                        metric="MSE",
                         n_bootstrap=n_bootstrap,
                         seed=seed,
-                    )
-                )
-
+                    ),
+                })
     out = pd.DataFrame(rows)
     if len(out) and "p_value" in out:
-        out["p_holm"] = holm_adjust(out["p_value"].tolist())
+        out["p_holm"] = np.nan
+        for _, indices in out.groupby("study_task", sort=False).groups.items():
+            out.loc[indices, "p_holm"] = holm_adjust(out.loc[indices, "p_value"].tolist())
     return out
 
 
@@ -485,10 +600,11 @@ def pairwise_tests(
     df: pd.DataFrame,
     task: str,
     cluster_col: str = "patient_id",
-    n_bootstrap: int = 2000,
+    n_bootstrap: int = 5000,
     seed: int = 42,
     variants: Optional[list[str]] = None,
 ) -> pd.DataFrame:
+    df = ensure_columns(df)
     if task == "human_ai":
         return human_ai_pairwise_tests(
             df=df,
@@ -496,6 +612,18 @@ def pairwise_tests(
             seed=seed,
             variants=variants,
         )
+
+    if df["grade_type"].nunique() > 1:
+        parts = []
+        for grade_type, sub in df.groupby("grade_type", sort=False):
+            part = pairwise_tests(sub, task, cluster_col, n_bootstrap, seed, variants)
+            if not part.empty:
+                part.insert(0, "grade_type", grade_type)
+                parts.append(part)
+        out = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+        if not out.empty:
+            out["p_holm"] = holm_adjust(out["p_value"].tolist())
+        return out
 
     df = make_variant(df, task)
     id_cols = [
@@ -510,8 +638,6 @@ def pairwise_tests(
         "visit_num",
         "target_visit",
         "target_visit_num",
-        "age",
-        "sex",
     ]
 
     if task in {"single_vs_multi_evaluator", "single_vs_multi_predictor"}:
@@ -556,6 +682,8 @@ def make_pair_long_for_regression(
     outcome:
         abs_error or squared_error
     """
+    if not {"age", "sex"}.issubset(wide.columns):
+        raise ValueError("GEE/LMM input requires age and sex columns.")
     rows = []
 
     for _, row in wide.iterrows():
@@ -575,7 +703,7 @@ def make_pair_long_for_regression(
 
         visit_num = row.get("visit_num", row.get("target_visit", np.nan))
         age = row.get("age", np.nan)
-        sex = row.get("sex", "UNKNOWN")
+        sex = row.get("sex", np.nan)
 
         for label, pred_col in [("A", variant_a), ("B", variant_b)]:
             pred = float(row[pred_col])
@@ -616,20 +744,14 @@ def build_regression_formula(data: pd.DataFrame, outcome: str) -> str:
     if "visit_num" in data.columns and data["visit_num"].nunique(dropna=True) > 1:
         terms.append("C(visit_num)")
 
-    if "age" in data.columns:
-        age_numeric = pd.to_numeric(data["age"], errors="coerce")
-        if age_numeric.notna().sum() > 0 and age_numeric.nunique(dropna=True) > 1:
-            terms.append("age")
-
-    if "sex" in data.columns and data["sex"].nunique(dropna=True) > 1:
-        terms.append("C(sex)")
+    terms.extend(["age", "C(sex)"])
 
     return outcome + " ~ " + " + ".join(terms)
 
 
-def extract_model_label_coef(result) -> tuple[float, float, str]:
+def extract_model_label_coef(result) -> tuple[float, float, float, float, str]:
     """
-    Extract B-vs-A coefficient and p value.
+    Extract B-vs-A coefficient, 95% confidence interval, and p value.
 
     Coefficient meaning:
         error_B - error_A
@@ -645,9 +767,59 @@ def extract_model_label_coef(result) -> tuple[float, float, str]:
             break
 
     if target_name is None:
-        return np.nan, np.nan, "model_label coefficient not found"
+        return np.nan, np.nan, np.nan, np.nan, "model_label coefficient not found"
 
-    return float(params[target_name]), float(pvalues[target_name]), ""
+    ci_lower, ci_upper = result.conf_int().loc[target_name]
+    values = (float(params[target_name]), float(pvalues[target_name]),
+              float(ci_lower), float(ci_upper))
+    return (*values, "" if np.isfinite(values).all() else "non-finite model inference")
+
+
+def regression_result_row(result) -> dict:
+    coef, p_value, coef_lower, coef_upper, error = extract_model_label_coef(result)
+    return {
+        "diff_A_minus_B": -coef,
+        "ci_lower": -coef_upper,
+        "ci_upper": -coef_lower,
+        "coef_B_minus_A": coef,
+        "coef_ci_lower": coef_lower,
+        "coef_ci_upper": coef_upper,
+        "p_value": p_value,
+        "status": "ok" if not error else error,
+    }
+
+
+def regression_error_row(status: str) -> dict:
+    return {
+        "diff_A_minus_B": np.nan,
+        "ci_lower": np.nan,
+        "ci_upper": np.nan,
+        "coef_B_minus_A": np.nan,
+        "coef_ci_lower": np.nan,
+        "coef_ci_upper": np.nan,
+        "p_value": np.nan,
+        "status": status,
+    }
+
+
+def prepare_regression_data(
+    wide: pd.DataFrame,
+    variant_a: str,
+    variant_b: str,
+    outcome: str,
+    cluster_col: str,
+) -> pd.DataFrame:
+    data = make_pair_long_for_regression(wide, variant_a, variant_b, cluster_col)
+    data = data.dropna(subset=[outcome, "subject_id", "model_label"]).copy()
+    data["age"] = pd.to_numeric(data["age"], errors="coerce")
+    data["sex"] = data["sex"].astype("string").str.strip().replace("", pd.NA)
+    if data[["age", "sex"]].isna().any().any():
+        raise ValueError("GEE/LMM input requires age and sex for every paired observation.")
+    data["sex"] = data["sex"].astype(str)
+    data["center"] = data["center"].fillna("UNKNOWN").astype(str)
+    data["subject_id"] = data["subject_id"].fillna("UNKNOWN").astype(str)
+    data["eye_id"] = data["eye_id"].fillna("UNKNOWN").astype(str)
+    return data
 
 
 def gee_pairwise_test(
@@ -671,37 +843,11 @@ def gee_pairwise_test(
         import statsmodels.api as sm
         import statsmodels.formula.api as smf
     except Exception as exc:
-        return {
-            "diff_A_minus_B": np.nan,
-            "coef_B_minus_A": np.nan,
-            "p_value": np.nan,
-            "status": f"statsmodels import failed: {exc}",
-        }
+        return regression_error_row(f"statsmodels import failed: {exc}")
 
-    data = make_pair_long_for_regression(
-        wide=wide,
-        variant_a=variant_a,
-        variant_b=variant_b,
-        cluster_col=cluster_col,
-    )
-
-    data = data.dropna(subset=[outcome, "subject_id", "model_label"]).copy()
-    data["center"] = data["center"].fillna("UNKNOWN").astype(str)
-    data["subject_id"] = data["subject_id"].fillna("UNKNOWN").astype(str)
-    data["eye_id"] = data["eye_id"].fillna("UNKNOWN").astype(str)
-    data["sex"] = data["sex"].fillna("UNKNOWN").astype(str)
-    data["age"] = pd.to_numeric(data["age"], errors="coerce")
-
-    if data["age"].notna().sum() > 0:
-        data["age"] = data["age"].fillna(data["age"].mean())
-
+    data = prepare_regression_data(wide, variant_a, variant_b, outcome, cluster_col)
     if data.empty or data["model_label"].nunique() < 2:
-        return {
-            "diff_A_minus_B": np.nan,
-            "coef_B_minus_A": np.nan,
-            "p_value": np.nan,
-            "status": "comparison input requires both model labels",
-        }
+        return regression_error_row("comparison input requires both model labels")
 
     try:
         formula = build_regression_formula(data, outcome)
@@ -715,22 +861,10 @@ def gee_pairwise_test(
         )
         result = model.fit()
 
-        coef_b_minus_a, p_value, err = extract_model_label_coef(result)
-
-        return {
-            "diff_A_minus_B": -coef_b_minus_a,
-            "coef_B_minus_A": coef_b_minus_a,
-            "p_value": p_value,
-            "status": "ok" if err == "" else err,
-        }
+        return regression_result_row(result)
 
     except Exception as exc:
-        return {
-            "diff_A_minus_B": np.nan,
-            "coef_B_minus_A": np.nan,
-            "p_value": np.nan,
-            "status": f"gee failed: {exc}",
-        }
+        return regression_error_row(f"gee failed: {exc}")
 
 
 def mixedlm_pairwise_test(
@@ -753,43 +887,17 @@ def mixedlm_pairwise_test(
     try:
         import statsmodels.formula.api as smf
     except Exception as exc:
-        return {
-            "diff_A_minus_B": np.nan,
-            "coef_B_minus_A": np.nan,
-            "p_value": np.nan,
-            "status": f"statsmodels import failed: {exc}",
-        }
+        return regression_error_row(f"statsmodels import failed: {exc}")
 
-    data = make_pair_long_for_regression(
-        wide=wide,
-        variant_a=variant_a,
-        variant_b=variant_b,
-        cluster_col=cluster_col,
-    )
-
-    data = data.dropna(subset=[outcome, "subject_id", "model_label"]).copy()
-    data["center"] = data["center"].fillna("UNKNOWN").astype(str)
-    data["subject_id"] = data["subject_id"].fillna("UNKNOWN").astype(str)
-    data["eye_id"] = data["eye_id"].fillna("UNKNOWN").astype(str)
-    data["sex"] = data["sex"].fillna("UNKNOWN").astype(str)
-    data["age"] = pd.to_numeric(data["age"], errors="coerce")
-
-    if data["age"].notna().sum() > 0:
-        data["age"] = data["age"].fillna(data["age"].mean())
-
+    data = prepare_regression_data(wide, variant_a, variant_b, outcome, cluster_col)
     if data.empty or data["model_label"].nunique() < 2:
-        return {
-            "diff_A_minus_B": np.nan,
-            "coef_B_minus_A": np.nan,
-            "p_value": np.nan,
-            "status": "comparison input requires both model labels",
-        }
+        return regression_error_row("comparison input requires both model labels")
 
     try:
         formula = build_regression_formula(data, outcome)
 
         vc_formula = None
-        if data["eye_id"].nunique(dropna=True) > 1:
+        if data.groupby("subject_id")["eye_id"].nunique(dropna=True).gt(1).any():
             vc_formula = {"eye": "0 + C(eye_id)"}
 
         with warnings.catch_warnings():
@@ -799,6 +907,7 @@ def mixedlm_pairwise_test(
                 formula=formula,
                 data=data,
                 groups=data["subject_id"],
+                re_formula="1",
                 vc_formula=vc_formula,
             )
             result = model.fit(
@@ -808,22 +917,10 @@ def mixedlm_pairwise_test(
                 disp=False,
             )
 
-        coef_b_minus_a, p_value, err = extract_model_label_coef(result)
-
-        return {
-            "diff_A_minus_B": -coef_b_minus_a,
-            "coef_B_minus_A": coef_b_minus_a,
-            "p_value": p_value,
-            "status": "ok" if err == "" else err,
-        }
+        return regression_result_row(result)
 
     except Exception as exc:
-        return {
-            "diff_A_minus_B": np.nan,
-            "coef_B_minus_A": np.nan,
-            "p_value": np.nan,
-            "status": f"mixedlm failed: {exc}",
-        }
+        return regression_error_row(f"mixedlm failed: {exc}")
 
 
 def regression_pairwise_tests(
@@ -837,6 +934,21 @@ def regression_pairwise_tests(
     A is the reference condition: coefficient = error_B - error_A and
     diff_A_minus_B = error_A - error_B. Subject ID defines repeated rows.
     """
+    df = ensure_columns(df)
+    if df["grade_type"].nunique() > 1:
+        gee_parts, mixed_parts = [], []
+        for grade_type, sub in df.groupby("grade_type", sort=False):
+            gee, mixed = regression_pairwise_tests(sub, task, cluster_col)
+            if not gee.empty:
+                gee.insert(0, "grade_type", grade_type)
+                gee_parts.append(gee)
+            if not mixed.empty:
+                mixed.insert(0, "grade_type", grade_type)
+                mixed_parts.append(mixed)
+        gee_df = pd.concat(gee_parts, ignore_index=True) if gee_parts else pd.DataFrame()
+        mixed_df = pd.concat(mixed_parts, ignore_index=True) if mixed_parts else pd.DataFrame()
+        return holm_adjust_by_comparison(gee_df), holm_adjust_by_comparison(mixed_df)
+
     df = make_variant(df, task)
     id_cols = [
         "dataset_name",
@@ -918,10 +1030,4 @@ def regression_pairwise_tests(
     gee_df = pd.DataFrame(gee_rows)
     mixed_df = pd.DataFrame(mixed_rows)
 
-    if len(gee_df) and "p_value" in gee_df:
-        gee_df["p_holm"] = holm_adjust(gee_df["p_value"].tolist())
-
-    if len(mixed_df) and "p_value" in mixed_df:
-        mixed_df["p_holm"] = holm_adjust(mixed_df["p_value"].tolist())
-
-    return gee_df, mixed_df
+    return holm_adjust_by_comparison(gee_df), holm_adjust_by_comparison(mixed_df)

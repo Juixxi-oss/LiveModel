@@ -1,7 +1,9 @@
-cd /data_ssd/juixxi/LiveModel
-export PYTHONPATH=/data_ssd/juixxi/LiveModel
-source activate env_1
-clear
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_DIR}"
+export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+mkdir -p log/SingleViewTimeFusionRegressor_Evaluator log/SingleViewTimeFusionRegressor_Predictor
 
 
 
@@ -320,5 +322,3 @@ nohup python -u main/SingleViewTimeFusionRegressor_main.py \
     --device cuda:3 --task_type predictor --grade_type SR --photo_type P --num_folds 10 --start_fold 0 \
     --num_epochs 50 --batch_size 8 --lr 1e-4 --seed 42 \
     > log/SingleViewTimeFusionRegressor_Predictor/SingleViewTimeFusionRegressor_SR_photoP.txt 2>&1 &
-    
-    

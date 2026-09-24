@@ -24,14 +24,14 @@ def main():
     reader = commands.add_parser('inter-rater', help='Reader ICC from canonical long ratings')
     reader.add_argument('--input-csv', type=Path, required=True)
     reader.add_argument('--output-csv', type=Path, required=True)
-    reader.add_argument('--n-bootstrap', type=int, default=2000)
+    reader.add_argument('--n-bootstrap', type=int, default=5000)
     reader.add_argument('--seed', type=int, default=42)
     reader.add_argument('--reader-scope', choices=['random', 'fixed'], default='random',
                         help='Generalize to comparable readers, or restrict inference to these readers')
     repeat = commands.add_parser('intra-rater', help='Same-reader, same-condition repeated-session ICC and MDC')
     repeat.add_argument('--input-csv', type=Path, required=True)
     repeat.add_argument('--output-csv', type=Path, required=True)
-    repeat.add_argument('--n-bootstrap', type=int, default=2000)
+    repeat.add_argument('--n-bootstrap', type=int, default=5000)
     repeat.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     if args.analysis == 'wide-repeatability':

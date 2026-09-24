@@ -83,7 +83,7 @@ def _patient_bootstrap_intervals(matrix: np.ndarray, patient_ids: np.ndarray,
     return intervals
 
 
-def intra_rater_repeatability_table(data: pd.DataFrame, n_bootstrap: int = 2000,
+def intra_rater_repeatability_table(data: pd.DataFrame, n_bootstrap: int = 5000,
                                     seed: int = 42) -> pd.DataFrame:
     """Calculate separate same-reader, same-condition test-retest statistics.
 

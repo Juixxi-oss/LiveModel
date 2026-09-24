@@ -4,7 +4,7 @@ from typing import Optional
 import pandas as pd
 
 from analysis_core import ensure_columns, performance_table
-from analysis_tests import pairwise_tests, regression_pairwise_tests
+from analysis_tests import pairwise_tests, regression_pairwise_tests, human_ai_performance_table
 
 
 def load_exported_predictions(input_root: str, grade_type: str, datasets: list[str]) -> pd.DataFrame:
@@ -113,12 +113,12 @@ def subset_task(df: pd.DataFrame, task: str) -> pd.DataFrame:
         ].copy()
 
     if task == "generalization":
-        return df.copy()
+        return df[df["eval_mode"].ne("human_ai")].copy()
 
     if task == "human_ai":
         return df[
             df["eval_mode"].eq("human_ai")
-            | df["model_name"].isin(["Human alone", "Model alone", "Human+AI", "human_alone", "model_alone", "human_ai"])
+            | df["model_name"].isin(["Human alone", "AI alone", "Model alone", "Human+AI", "human_alone", "ai_alone", "model_alone", "human_ai"])
         ].copy()
 
     raise ValueError(f"Unknown task: {task}")
@@ -140,8 +140,6 @@ def performance_group_cols(task: str) -> list[str]:
         return base + ["eval_mode", "padding_length", "padding_tag", "target_visit", "available_visits"]
     if task == "generalization":
         return ["dataset_name", "center", "grade_type", "model_name", "eval_mode", "target_visit"]
-    if task == "human_ai":
-        return ["dataset_name", "center", "grade_type", "model_name", "assistance_mode", "reader_id", "target_visit"]
     return base
 
 
@@ -173,7 +171,8 @@ def run_task(
             return
         raise ValueError(f"Task filter selected no rows: task={task}, dataset={dataset_group}")
     sub.to_csv(os.path.join(output_dir, f"{prefix}_{task}_{dataset_group}_analysis_input.csv"), index=False)
-    perf = performance_table(sub, performance_group_cols(task), cluster_col, n_bootstrap, seed)
+    perf = (human_ai_performance_table(sub, n_bootstrap, seed) if task == "human_ai"
+            else performance_table(sub, performance_group_cols(task), cluster_col, n_bootstrap, seed))
     perf.to_csv(os.path.join(output_dir, f"{prefix}_{task}_{dataset_group}_performance.csv"), index=False)
     if should_pairwise(task):
         pair_task = task if task not in {"single_time", "v9_models"} else "model"

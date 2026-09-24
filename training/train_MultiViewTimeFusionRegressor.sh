@@ -1,7 +1,9 @@
-cd /data_ssd/juixxi/LiveModel
-export PYTHONPATH=/data_ssd/juixxi/LiveModel
-source activate env_1
-clear
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_DIR}"
+export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+mkdir -p log/MultiViewTimeFusionRegressor_Evaluator log/MultiViewTimeFusionRegressor_Predictor
 
 
 
@@ -78,5 +80,3 @@ nohup python -u main/MultiViewTimeFusionRegressor_main.py \
     --device cuda:0 --task_type predictor --grade_type SR --num_folds 10 --start_fold 0 \
     --num_epochs 50 --batch_size 8 --lr 1e-4 --seed 42 \
     > log/MultiViewTimeFusionRegressor_Predictor/MultiViewTimeFusionRegressor_SR.txt 2>&1 &
-    
-    

@@ -9,20 +9,31 @@ from analysis_core import ensure_columns, parse_series_id
 GRADE_COLUMNS = ["C", "N", "P", "BCVA", "OSI", "MTF", "SR"]
 
 
-def _parse_table_spec(spec: str) -> tuple[str, str, str]:
-    """Parse mode[:reader_id]:path."""
-    parts = spec.split(":", 2)
+def _parse_table_spec(spec: str) -> tuple[str, str, str, str]:
+    """Parse mode:path, mode:reader_id:path, or study_task:mode:reader_id:path."""
+    parts = spec.split(":", 3)
     if len(parts) == 2:
         mode, path = parts
-        reader = "reader_unknown"
+        reader = ""
+        study_task = ""
     elif len(parts) == 3:
         mode, reader, path = parts
+        study_task = ""
+    elif len(parts) == 4:
+        study_task, mode, reader, path = parts
     else:
-        raise ValueError("Human table spec must be mode:path or mode:reader_id:path")
-    return mode, reader, path
+        raise ValueError("Human table spec must be mode:path, mode:reader_id:path, or study_task:mode:reader_id:path")
+    if not mode or not path:
+        raise ValueError("Human table spec requires a mode and path")
+    return study_task, mode, reader, path
 
 
-def human_table_to_long(path: str, assistance_mode: str, reader_id: str = "reader_unknown") -> pd.DataFrame:
+def human_table_to_long(
+    path: str,
+    assistance_mode: str,
+    reader_id: str = "",
+    study_task: str = "",
+) -> pd.DataFrame:
     if path.lower().endswith((".xlsx", ".xls")):
         raw = pd.read_excel(path)
     else:
@@ -30,19 +41,41 @@ def human_table_to_long(path: str, assistance_mode: str, reader_id: str = "reade
     if "SeriesID" not in raw.columns:
         raise ValueError(f"Human table must contain SeriesID column: {path}")
     grades = [c for c in raw.columns if c in GRADE_COLUMNS]
+    has_reader_column = "reader_id" in raw.columns
+    model_alone = "".join(ch for ch in assistance_mode.lower() if ch.isalnum()) in {
+        "aialone", "modelalone", "livemodel"
+    }
     rows = []
     for _, r in raw.iterrows():
         sid = str(r["SeriesID"])
         meta = parse_series_id(sid)
+        row_task = r.get("study_task", "")
+        row_task = "" if pd.isna(row_task) else str(row_task).strip()
+        if study_task and row_task and row_task != study_task:
+            raise ValueError(f"Conflicting study_task values in {path}")
+        row_task = study_task or row_task
+        if not row_task:
+            raise ValueError(f"Human table requires study_task in the input spec or each row: {path}")
+
+        row_reader = r.get("reader_id", "")
+        row_reader = "" if pd.isna(row_reader) else str(row_reader).strip()
+        if has_reader_column and not row_reader and not model_alone:
+            raise ValueError(f"Human table has a missing reader_id: {path}")
+        resolved_reader = row_reader or str(reader_id).strip()
+        if not resolved_reader or resolved_reader == "reader_unknown":
+            if not model_alone:
+                raise ValueError(f"Human table requires reader_id in the input spec or each row: {path}")
+            resolved_reader = "AI"
         for g in grades:
             if pd.isna(r[g]):
                 continue
             rows.append({
-                "dataset_name": meta["center"],
+                "dataset_name": "external" if meta["center"] in {"S01", "S09"} else "internal",
                 "eval_mode": "human_ai",
                 "model_name": assistance_mode,
-                "reader_id": reader_id,
+                "reader_id": resolved_reader,
                 "assistance_mode": assistance_mode,
+                "study_task": row_task,
                 "grade_type": g,
                 "SeriesID": sid,
                 "center": meta["center"],
@@ -87,8 +120,8 @@ def attach_truth(human_df: pd.DataFrame, model_df: pd.DataFrame) -> pd.DataFrame
 def load_human_tables(specs: Iterable[str], truth_prediction_df: pd.DataFrame) -> pd.DataFrame:
     frames = []
     for spec in specs:
-        mode, reader, path = _parse_table_spec(spec)
-        frames.append(human_table_to_long(path, mode, reader))
+        study_task, mode, reader, path = _parse_table_spec(spec)
+        frames.append(human_table_to_long(path, mode, reader, study_task))
     if not frames:
         return pd.DataFrame()
     human = pd.concat(frames, ignore_index=True)

@@ -16,12 +16,13 @@ This repository **releases only the code for**:
 - 🏗️ Model architectures
 - 🎯 Trainers
 - 🚀 Training entrypoints (`*_main.py`)
+- 📈 Prediction export and statistical analysis
 
 This repository **does NOT include**:
 
 - 🔒 Clinical dataset / labels
 - 🔒 Pretrained model weights / checkpoints
-- 🔒 Test cases / demo samples
+- 🔒 Clinical test cases / demo samples
 
 ---
 
@@ -29,18 +30,24 @@ This repository **does NOT include**:
 
 ```text
 .
+├── .gitignore
+├── LICENSE
+├── LiveModel.png
+├── README.md
 ├── data/
-│   ├── label/              # (not provided) place your labels here
-│   └── photo/              # (not provided) place your images here
+│   ├── label/.gitkeep      # Place your labels here
+│   └── photo/.gitkeep      # Place your images here
 ├── dataset/
 │   ├── DataSet.py
 │   ├── DataStructure.py
+│   ├── __init__.py
 │   └── util.py
 ├── model/
 │   ├── SnapRegressor.py
 │   ├── ViewFusionRegressor.py
 │   ├── SingleViewTimeFusionRegressor.py
 │   ├── MultiViewTimeFusionRegressor.py
+│   ├── __init__.py
 │   ├── transformers.py
 │   └── util.py
 ├── trainer/
@@ -49,6 +56,7 @@ This repository **does NOT include**:
 │   ├── ViewFusionRegressorTrainer.py
 │   ├── SingleViewTimeFusionRegressorTrainer.py
 │   ├── MultiViewTimeFusionRegressorTrainer.py
+│   ├── __init__.py
 │   └── util.py
 ├── main/
 │   ├── SnapRegressor_main.py
@@ -65,12 +73,22 @@ This repository **does NOT include**:
 │   ├── evaluation_dataset.py
 │   ├── evaluation_util.py
 │   ├── export_predictions.py
+│   ├── export_predictions.sh
 │   ├── export_main.py
 │   ├── analysis_core.py
 │   ├── analysis_tests.py
 │   ├── analysis_tasks.py
 │   ├── analysis_human.py
-│   └── analyze_main.py
+│   ├── analyze_main.py
+│   ├── analyze_predictions.sh
+│   ├── analyze_reliability.py
+│   └── reliability/
+│       ├── __init__.py
+│       ├── intra_rater.py
+│       ├── reader_icc.py
+│       └── wide_repeatability.py
+├── tests/
+│   └── test_training_and_analysis.py
 └── requirements.txt
 ```
 
@@ -85,6 +103,7 @@ This repository **does NOT include**:
 | 🚀 `main/` | Training entrypoints |
 | ⚙️ `training/` | Shell scripts for training |
 | 📈 `evaluation/` | Evaluation, prediction export, and analysis tools |
+| 🧪 `tests/` | Code-level checks |
 
 ---
 
@@ -105,6 +124,7 @@ torchvision
 numpy
 pandas
 scikit-learn
+statsmodels
 Pillow
 opencv-python
 ```
@@ -182,14 +202,14 @@ python main/SnapRegressor_main.py --your_args_here
 
 > 💡 Because datasets and weights are not released, users must configure their own training settings, including batch size, `num_workers`, mixed precision, checkpoint paths, and other hardware-dependent options.
 >
-> 📝 The training scripts specify the model settings. The SnapRegressor batch script selects `--scheduler warmup_cosine`; a direct entrypoint call requires that option to select the same schedule.
+> 📝 The training scripts specify the model settings for each stage.
 
 ---
 
 # 🔬 Reproducibility Notes
 
 - 🖼️ Image input resolution and augmentation policy in the paper included resizing to **224×224** and common photometric/geometric augmentations.
-- The released trainers use **AdamW**. SinglePhoto training uses linear warm-up followed by cosine warm restarts, as selected by `training/train_SnapRegressor.sh`. A direct call to `main/SnapRegressor_main.py` defaults to `--scheduler none` unless `--scheduler warmup_cosine` is passed. The fusion trainers also use warm-up and cosine schedules.
+- ⚡ Training uses **AdamW** with linear learning-rate warm-up followed by cosine annealing with warm restarts.
 - 🔄 Progressive initialization was applied from single-view modeling to spatial fusion and then spatiotemporal modeling:
 
 ```text
@@ -201,32 +221,6 @@ SingleViewTimeFusionRegressor
     ↓
 MultiViewTimeFusionRegressor
 ```
-
----
-
-# SnapRegressor learning-rate schedule
-
-SnapRegressor supports an epoch-based scheduler: linear warm-up
-from 0.1 to 1.0 of the base rate over 5 epochs, then cosine warm restarts with
-`T_0=15`, `T_mult=2`, and `eta_min=1e-7`. It advances once per training epoch.
-The batch training script selects `--scheduler warmup_cosine`; a direct
-entrypoint call defaults to `--scheduler none` unless the schedule is selected.
-
-For a single run with this schedule, select `--scheduler warmup_cosine`, or use
-the separate recipe:
-
-```bash
-bash training/train_SnapRegressor_with_scheduler.sh \
-  --grade_type C --photo_type C --device cuda:0
-```
-
-The batch script and separate recipe write checkpoints to
-`file/SnapRegressor_warmup_cosine`; the batch script writes logs to
-`log/SnapRegressor_warmup_cosine`.
-The scheduler configuration is recorded in checkpoint metadata.
-
-`trainer/util.py::generate_attention_2` generates soft supervision targets for
-temporal attention. It does not transform the clinical outcome labels.
 
 ---
 

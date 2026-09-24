@@ -13,6 +13,7 @@ import pandas as pd
 from dataset import getTimePointList, getTimePointsList
 from evaluation_util import setSeed, getTransforms, load_patient_split, filter_by_fold, aggregate_final
 from export_predictions import export_snap, export_viewfusion, export_single_time, export_multi_time
+from analysis_core import load_demographics, attach_demographics
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -77,6 +78,7 @@ def parse_args():
 def main():
     args = parse_args()
     setSeed(args.seed)
+    demographics = load_demographics(args.tabular_path)
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 
@@ -139,7 +141,7 @@ def main():
         if 'multi_predictor' in args.models:
             all_rows.extend(export_multi_time(args, series_selectors, fold_idx, device, transform, 'predictor'))
 
-    df_fold = pd.DataFrame(all_rows)
+    df_fold = attach_demographics(pd.DataFrame(all_rows), demographics)
 
     out_dir = os.path.join(args.output_root, args.grade_type, args.dataset_name)
     os.makedirs(out_dir, exist_ok=True)
@@ -149,7 +151,7 @@ def main():
 
     df_fold.to_csv(fold_path, index=False)
 
-    df_final = aggregate_final(df_fold)
+    df_final = attach_demographics(aggregate_final(df_fold), demographics)
     df_final.to_csv(final_path, index=False)
 
     print('[*] Export finished.')
@@ -159,7 +161,5 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
 
 

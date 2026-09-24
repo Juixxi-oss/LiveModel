@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-def inter_rater_icc_table(data, n_bootstrap=2000, seed=42, reader_scope='random'):
+def inter_rater_icc_table(data, n_bootstrap=5000, seed=42, reader_scope='random'):
     """Analyze raw ratings separately by task, outcome and reading condition.
 
     Input is canonical long data: task, outcome, method (Human/HumanAI/AI),

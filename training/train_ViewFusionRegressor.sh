@@ -1,7 +1,9 @@
-cd /data_ssd/juixxi/LiveModel
-export PYTHONPATH=/data_ssd/juixxi/LiveModel
-source activate env_1
-clear
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_DIR}"
+export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+mkdir -p log/ViewFusionRegressor
 
 
 
